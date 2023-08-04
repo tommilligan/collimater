@@ -220,14 +220,14 @@ class LoadingIndicator:
     def __init__(self) -> None:
         self._index = 0
         self._frames = [
-            ".       ",
-            " .      ",
-            "  .     ",
-            "   .    ",
-            "    .   ",
-            "     .  ",
-            "      . ",
-            "       .",
+            " .       ",
+            "  .      ",
+            "   .     ",
+            "    .    ",
+            "     .   ",
+            "      .  ",
+            "       . ",
+            "        .",
         ]
 
     def tick(self) -> None:
