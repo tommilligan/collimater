@@ -227,16 +227,23 @@ def find_relevant_mark(
 class LoadingIndicator:
     def __init__(self) -> None:
         self._index = 0
-        self._frames = [
-            " .       ",
-            "  .      ",
-            "   .     ",
-            "    .    ",
-            "     .   ",
-            "      .  ",
-            "       . ",
-            "        .",
-        ]
+        self._frames = []
+        for index in range(8):
+            frame = " " * (index + 1) + "."
+            for _ in range(3):
+                self._frames.append(frame)
+
+    def tick(self) -> None:
+        self._index = (self._index + 1) % len(self._frames)
+
+    def display(self) -> str:
+        return self._frames[self._index]
+
+
+class StasisIndicator:
+    def __init__(self) -> None:
+        self._index = 0
+        self._frames = ["        ."] * 15 + [""] * 5
 
     def tick(self) -> None:
         self._index = (self._index + 1) % len(self._frames)
@@ -330,6 +337,7 @@ class DisplayManager:
         # state
         self._relevant_mark = Uninitialized.UNINITIALIZED
         self._loading_indicator = LoadingIndicator()
+        self._stasis_indicator = StasisIndicator()
 
     def run(self) -> None:
         poll_until_shutdown(
@@ -350,7 +358,8 @@ class DisplayManager:
             return
 
         if self._relevant_mark is None:
-            self._printer.print(_DEFAULT_DISPLAY)
+            self._printer.print(self._stasis_indicator.display())
+            self._stasis_indicator.tick()
             return
 
         now = datetime.now(tz=timezone.utc)
@@ -528,7 +537,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--print-interval",
         type=float,
-        default=0.1,
+        default=0.2,
         help="The interval to refresh the display output",
     )
     return parser
