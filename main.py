@@ -5,23 +5,41 @@ import logging
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from time import sleep
-from typing import Iterable, List, Optional, Protocol
+from typing import Callable, Iterable, List, Optional, Protocol
 
 import recurring_ical_events
 from dotenv import load_dotenv
 from icalendar import Calendar, Event
 from luma.core.error import DeviceNotFoundError
 from luma.core.interface.serial import noop, spi
-from luma.core.virtual import sevensegment, viewport
+from luma.core.virtual import sevensegment
 from luma.led_matrix.device import max7219
 from requests import Session
 from requests.adapters import HTTPAdapter, Retry
 
 _log = logging.getLogger(__file__)
+
+
+def poll_until_shutdown(
+    callable: Callable[[], None],
+    poll_interval: float,
+    shutdown_event: Event,
+) -> None:
+    _log.info("Polling every %.1f seconds...", poll_interval)
+    while not shutdown_event.is_set():
+        start_time = time.monotonic()
+        callable()
+        time_taken = time.monotonic() - start_time
+
+        delay = poll_interval - time_taken
+        if delay > 0.0:
+            # Wait for the remainder of the poll interval
+            # Unless we get shutdown, then return immediately.
+            shutdown_event.wait(delay)
 
 
 class ConfigurationError(Exception):
@@ -219,6 +237,114 @@ class LoadingIndicator:
         return self._frames[self._index]
 
 
+class RelevantMarkExtractor:
+    _poll_interval: float
+    _calendar_queue: queue.Queue
+    _calender: Optional[Calendar]
+    _relevant_mark_queue: queue.Queue
+
+    def __init__(
+        self,
+        poll_interval: float,
+        shutdown_event: threading.Event,
+        calendar_queue: queue.Queue,
+        relevant_mark_queue: queue.Queue,
+    ) -> None:
+        self._poll_interval = poll_interval
+        self._shutdown_event = shutdown_event
+        self._calendar_queue = calendar_queue
+        self._relevant_mark_queue = relevant_mark_queue
+
+        # state
+        self._calendar = None
+
+    def run(self) -> None:
+        poll_until_shutdown(
+            self.poll,
+            self._poll_interval,
+            self._shutdown_event,
+        )
+
+    def poll(self) -> None:
+        try:
+            self._calendar = self._calendar_queue.get()
+        except queue.Empty:
+            pass
+
+        if self._calendar is None:
+            return
+
+        _log.info("Extracting relevant mark")
+        now = datetime.now(tz=timezone.utc)
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=2)
+
+        events = recurring_ical_events.of(self._calendar).between(start_date, end_date)
+        marks = extract_marks(events)
+
+        relevant_mark = find_relevant_mark(
+            marks,
+            criteria=RelevantCriteria(
+                # FIXME
+                imminent=5.0 * 60.0 * 100.0,
+                recent=10.0 * 60.0 * 100.0,
+                scheduled=10.0 * 60.0,
+            ),
+            now=now,
+        )
+        _log.info(f"Extracted relevant mark: {relevant_mark}")
+        try:
+            self._relevant_mark_queue.put(relevant_mark)
+        except queue.Full:
+            pass
+
+
+class DisplayManager:
+    _poll_interval: float
+    _relevant_mark_queue: queue.Queue
+    _printer: Printer
+
+    _relevant_mark: Optional[RelevantMark]
+    _loading_indicator: LoadingIndicator
+
+    def __init__(
+        self,
+        poll_interval: float,
+        shutdown_event: threading.Event,
+        relevant_mark_queue: queue.Queue,
+        printer: Printer,
+    ) -> None:
+        self._poll_interval = poll_interval
+        self._shutdown_event = shutdown_event
+        self._relevant_mark_queue = relevant_mark_queue
+        self._printer = printer
+
+        # state
+        self._relevant_mark = None
+        self._loading_indicator = LoadingIndicator()
+
+    def run(self) -> None:
+        poll_until_shutdown(
+            self.poll,
+            self._poll_interval,
+            self._shutdown_event,
+        )
+
+    def poll(self) -> None:
+        try:
+            self._relevant_mark = self._relevant_mark_queue.get(block=False)
+        except queue.Empty:
+            pass
+
+        if self._relevant_mark is None:
+            self._printer.print(self._loading_indicator.display())
+            self._loading_indicator.tick()
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        self._printer.print(format_timedelta(now - self._relevant_mark.mark.at))
+
+
 class Collimater:
     _calendar_fetcher: CalendarFetcher
     _calendar_fetch_interval: float
@@ -251,94 +377,69 @@ class Collimater:
         relevant_mark_queue = queue.Queue(1)
 
         def calendar_fetcher_loop() -> None:
-            while not self._shutdown_event.wait(self._calendar_fetch_interval):
-                _log.info("Fetching calendar")
-                calendar = self._calendar_fetcher.fetch()
-                try:
-                    calendar_queue.put(calendar)
-                except queue.Full:
-                    pass
-                _log.info("Fetched calendar")
+            _log.info("Fetching calendar")
+            calendar = self._calendar_fetcher.fetch()
+            try:
+                calendar_queue.put(calendar)
+            except queue.Full:
+                pass
+            _log.info("Fetched calendar")
 
-        calendar_fetcher_thread = threading.Thread(
-            target=calendar_fetcher_loop,
+        def calender_fetcher_run() -> None:
+            poll_until_shutdown(
+                calendar_fetcher_loop,
+                self._calendar_fetch_interval,
+                self._shutdown_event,
+            )
+
+        threading.Thread(
+            target=calender_fetcher_run,
             args=(),
             name="calendar_fetcher",
             daemon=True,
+        ).start()
+
+        relevant_mark_extractor = RelevantMarkExtractor(
+            poll_interval=self._relevant_mark_interval,
+            shutdown_event=self._shutdown_event,
+            calendar_queue=calendar_queue,
+            relevant_mark_queue=relevant_mark_queue,
         )
-        calendar_fetcher_thread.start()
 
-        def relevant_mark_loop() -> None:
-            calendar = None
-            while not self._shutdown_event.wait(self._relevant_mark_interval):
-                try:
-                    calendar = calendar_queue.get()
-                except queue.Empty:
-                    pass
-
-                if calendar is None:
-                    continue
-
-                _log.info("Extracting relevant mark")
-                now = datetime.now(tz=timezone.utc)
-                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                end_date = start_date + timedelta(days=2)
-
-                events = recurring_ical_events.of(calendar).between(
-                    start_date, end_date
-                )
-                marks = extract_marks(events)
-
-                relevant_mark = find_relevant_mark(
-                    marks,
-                    criteria=RelevantCriteria(
-                        # FIXME
-                        imminent=5.0 * 60.0 * 100.0,
-                        recent=10.0 * 60.0 * 100.0,
-                        scheduled=10.0 * 60.0,
-                    ),
-                    now=now,
-                )
-                _log.info(f"Extracted relevant mark: {relevant_mark}")
-                try:
-                    relevant_mark_queue.put(relevant_mark)
-                except queue.Full:
-                    pass
-
-        relevant_mark_thread = threading.Thread(
-            target=relevant_mark_loop,
+        threading.Thread(
+            target=relevant_mark_extractor.run,
             args=(),
-            name="relevant_mark",
+            name="relevant_mark_extractor",
+            daemon=True,
+        ).start()
+
+        display_manager = DisplayManager(
+            poll_interval=self._print_interval,
+            shutdown_event=self._shutdown_event,
+            relevant_mark_queue=relevant_mark_queue,
+            printer=self._printer,
+        )
+        display_manager_thread = threading.Thread(
+            target=display_manager.run,
+            args=(),
+            name="display_manager",
             daemon=True,
         )
-        relevant_mark_thread.start()
-
-        relevant_mark = None
-        loading_indicator = LoadingIndicator()
-        while not self._shutdown_event.wait(self._print_interval):
-            try:
-                relevant_mark = calendar_queue.get(block=False)
-            except queue.Empty:
-                pass
-
-            if relevant_mark is None:
-                self._printer.print(loading_indicator.display())
-                loading_indicator.tick()
-                continue
-
-            now = datetime.now(tz=timezone.utc)
-            self._printer.print(format_timedelta(relevant_mark.mark.at - now))
+        display_manager_thread.start()
+        display_manager_thread.join()
 
 
 def format_timedelta(delta: timedelta) -> str:
-    remainder = delta.total_seconds()
+    total_seconds = delta.total_seconds()
+    sign = "-" if total_seconds < 0 else " "
+    remainder = abs(total_seconds)
     # hours
     hours = int(remainder // 3600)
     remainder = remainder - (hours * 3600)
     # minutes
     minutes = int(remainder // 60)
 
-    return "    {:02}.{:02}".format(hours, minutes)
+    return f"   {sign}{hours:02}.{minutes:02}"
 
 
 def run(args: argparse.Namespace) -> None:
@@ -408,7 +509,9 @@ def setup_logging() -> None:
     root_logger.setLevel(logging.INFO)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
-        logging.Formatter("%(asctime)s|%(name)s|%(levelname)s|%(message)s")
+        logging.Formatter(
+            "%(asctime)s|%(name)s|%(threadName)s|%(levelname)s|%(message)s"
+        )
     )
     root_logger.handlers = [stream_handler]
 
