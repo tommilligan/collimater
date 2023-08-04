@@ -1,0 +1,19 @@
+[project]
+name = ""
+version = ""
+description = ""
+authors = [
+    {name = "Tom Milligan", email = "code@tommilligan.net"},
+]
+dependencies = [
+    "icalendar>=5.0.7",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "recurring-ical-events>=2.0.2",
+    "recurring-ical-events>=2.0.2",
+    "luma.led_matrix>=1.7.0",
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "MIT"}
+
