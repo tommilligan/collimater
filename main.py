@@ -3,9 +3,12 @@
 import argparse
 import logging
 import os
+import queue
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
+from time import sleep
 from typing import Iterable, List, Optional, Protocol
 
 import recurring_ical_events
@@ -101,7 +104,7 @@ class Mark:
 
     at: datetime
     description: str
-    freebusy: Optional[Freebusy]
+    freebusy: Freebusy
 
     @staticmethod
     def from_event(event: Event) -> Optional["Mark"]:
@@ -112,7 +115,10 @@ class Mark:
             return None
 
         description = event["SUMMARY"]
-        freebusy = Freebusy.try_from(event.get("X-MICROSOFT-CDO-BUSYSTATUS", ""))
+        freebusy = (
+            Freebusy.try_from(event.get("X-MICROSOFT-CDO-BUSYSTATUS", ""))
+            or Freebusy.BUSY
+        )
         return Mark(at=at, description=description, freebusy=freebusy)
 
 
@@ -171,6 +177,9 @@ def find_relevant_mark(
     future = None
 
     for mark in marks:
+        if mark.freebusy is Freebusy.FREE:
+            continue
+
         if mark.at < now:
             past = mark
         else:
@@ -189,43 +198,136 @@ def find_relevant_mark(
     return None
 
 
+class LoadingIndicator:
+    def __init__(self) -> None:
+        self._index = 0
+        self._frames = [
+            ".       ",
+            " .      ",
+            "  .     ",
+            "   .    ",
+            "    .   ",
+            "     .  ",
+            "      . ",
+            "       .",
+        ]
+
+    def tick(self) -> None:
+        self._index = (self._index + 1) % len(self._frames)
+
+    def display(self) -> str:
+        return self._frames[self._index]
+
+
 class Collimater:
     _calendar_fetcher: CalendarFetcher
+    _calendar_fetch_interval: float
+    _relevant_mark_interval: float
     _printer: Printer
+    _print_interval: float
+    _shutdown_event: threading.Event
 
-    def __init__(self, calendar_fetcher: CalendarFetcher, printer: Printer) -> None:
+    def __init__(
+        self,
+        calendar_fetcher: CalendarFetcher,
+        calendar_fetch_interval: float,
+        relevant_mark_interval: float,
+        printer: Printer,
+        print_interval: float,
+        shutdown_event: threading.Event,
+    ) -> None:
         self._calendar_fetcher = calendar_fetcher
+        self._calendar_fetch_interval = calendar_fetch_interval
+        self._relevant_mark_interval = relevant_mark_interval
         self._printer = printer
+        self._print_interval = print_interval
+        self._shutdown_event = shutdown_event
+
+        # state
+        self._calendar = None
 
     def run(self) -> None:
-        self.poll()
+        calendar_queue = queue.Queue(1)
+        relevant_mark_queue = queue.Queue(1)
 
-    def poll(self) -> None:
-        calendar = self._calendar_fetcher.fetch()
-        now = datetime.now(tz=timezone.utc)
-        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_date = start_date + timedelta(days=2)
+        def calendar_fetcher_loop() -> None:
+            while not self._shutdown_event.wait(self._calendar_fetch_interval):
+                _log.info("Fetching calendar")
+                calendar = self._calendar_fetcher.fetch()
+                try:
+                    calendar_queue.put(calendar)
+                except queue.Full:
+                    pass
+                _log.info("Fetched calendar")
 
-        events = recurring_ical_events.of(calendar).between(start_date, end_date)
-        marks = extract_marks(events)
-
-        relevant_mark = find_relevant_mark(
-            marks,
-            criteria=RelevantCriteria(
-                # FIXME
-                imminent=5.0 * 60.0 * 100.0,
-                recent=10.0 * 60.0,
-                scheduled=10.0 * 60.0,
-            ),
-            now=now,
+        calendar_fetcher_thread = threading.Thread(
+            target=calendar_fetcher_loop,
+            args=(),
+            name="calendar_fetcher",
+            daemon=True,
         )
-        _log.info(f"Relevant mark: {relevant_mark}")
+        calendar_fetcher_thread.start()
 
-        if relevant_mark is None:
-            self._printer.print("")
-            return
+        def relevant_mark_loop() -> None:
+            calendar = None
+            while not self._shutdown_event.wait(self._relevant_mark_interval):
+                try:
+                    calendar = calendar_queue.get()
+                except queue.Empty:
+                    pass
 
-        self._printer.print(format_timedelta(relevant_mark.mark.at - now))
+                if calendar is None:
+                    continue
+
+                _log.info("Extracting relevant mark")
+                now = datetime.now(tz=timezone.utc)
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_date + timedelta(days=2)
+
+                events = recurring_ical_events.of(calendar).between(
+                    start_date, end_date
+                )
+                marks = extract_marks(events)
+
+                relevant_mark = find_relevant_mark(
+                    marks,
+                    criteria=RelevantCriteria(
+                        # FIXME
+                        imminent=5.0 * 60.0 * 100.0,
+                        recent=10.0 * 60.0 * 100.0,
+                        scheduled=10.0 * 60.0,
+                    ),
+                    now=now,
+                )
+                _log.info(f"Extracted relevant mark: {relevant_mark}")
+                try:
+                    relevant_mark_queue.put(relevant_mark)
+                except queue.Full:
+                    pass
+
+        relevant_mark_thread = threading.Thread(
+            target=relevant_mark_loop,
+            args=(),
+            name="relevant_mark",
+            daemon=True,
+        )
+        relevant_mark_thread.start()
+
+        relevant_mark = None
+        loading_indicator = LoadingIndicator()
+        while not self._shutdown_event.wait(self._print_interval):
+            try:
+                relevant_mark = calendar_queue.get(block=False)
+            except queue.Empty:
+                pass
+
+            if relevant_mark is None:
+                self._printer.print(loading_indicator.display())
+                loading_indicator.tick()
+                continue
+
+            now = datetime.now(tz=timezone.utc)
+            self._printer.print(format_timedelta(relevant_mark.mark.at - now))
 
 
 def format_timedelta(delta: timedelta) -> str:
@@ -235,9 +337,8 @@ def format_timedelta(delta: timedelta) -> str:
     remainder = remainder - (hours * 3600)
     # minutes
     minutes = int(remainder // 60)
-    seconds = int(remainder - (minutes * 60))
 
-    return "{:02}:{:02}:{:02}".format(hours, minutes, seconds)
+    return "    {:02}.{:02}".format(hours, minutes)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -263,7 +364,15 @@ def run(args: argparse.Namespace) -> None:
     except DeviceNotFoundError:
         printer = PrinterCli()
 
-    Collimater(calendar_fetcher=calendar_fetcher, printer=printer).run()
+    shutdown_event = threading.Event()
+    Collimater(
+        calendar_fetcher=calendar_fetcher,
+        calendar_fetch_interval=args.calendar_fetch_interval,
+        relevant_mark_interval=args.relevant_mark_interval,
+        printer=printer,
+        print_interval=args.print_interval,
+        shutdown_event=shutdown_event,
+    ).run()
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -274,10 +383,22 @@ def make_parser() -> argparse.ArgumentParser:
         help="The local calendar file to use. Defaults to remote url",
     )
     parser.add_argument(
-        "--calendar-poll-interval",
+        "--calendar-fetch-interval",
         type=float,
         default=600.0,
         help="Interval (secs) to poll for calendar changes",
+    )
+    parser.add_argument(
+        "--relevant-mark-interval",
+        type=float,
+        default=60.0,
+        help="Interval (secs) to recompute relevant mark",
+    )
+    parser.add_argument(
+        "--print-interval",
+        type=float,
+        default=0.1,
+        help="The interval to refresh the display output",
     )
     return parser
 
