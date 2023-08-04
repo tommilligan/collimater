@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from typing import Callable, Iterable, List, Optional, Protocol
+from typing import Callable, Iterable, List, Optional, Protocol, Union
 
 import recurring_ical_events
 from dotenv import load_dotenv
@@ -22,6 +22,14 @@ from requests import Session
 from requests.adapters import HTTPAdapter, Retry
 
 _log = logging.getLogger(__file__)
+
+_DEFAULT_DISPLAY = " " * 8 + "."
+
+
+class Uninitialized(Enum):
+    """Indicates a missing value."""
+
+    UNINITIALIZED = "uninitialized"
 
 
 def poll_until_shutdown(
@@ -286,8 +294,8 @@ class RelevantMarkExtractor:
             marks,
             criteria=RelevantCriteria(
                 # FIXME
-                imminent=5.0 * 60.0 * 100.0,
-                recent=10.0 * 60.0 * 100.0,
+                imminent=3.0 * 60.0,
+                recent=2.0 * 60.0,
                 scheduled=10.0 * 60.0,
             ),
             now=now,
@@ -304,7 +312,7 @@ class DisplayManager:
     _relevant_mark_queue: queue.Queue
     _printer: Printer
 
-    _relevant_mark: Optional[RelevantMark]
+    _relevant_mark: Union[RelevantMark, None, Uninitialized]
     _loading_indicator: LoadingIndicator
 
     def __init__(
@@ -320,7 +328,7 @@ class DisplayManager:
         self._printer = printer
 
         # state
-        self._relevant_mark = None
+        self._relevant_mark = Uninitialized.UNINITIALIZED
         self._loading_indicator = LoadingIndicator()
 
     def run(self) -> None:
@@ -336,9 +344,13 @@ class DisplayManager:
         except queue.Empty:
             pass
 
-        if self._relevant_mark is None:
+        if self._relevant_mark is Uninitialized.UNINITIALIZED:
             self._printer.print(self._loading_indicator.display())
             self._loading_indicator.tick()
+            return
+
+        if self._relevant_mark is None:
+            self._printer.print(_DEFAULT_DISPLAY)
             return
 
         now = datetime.now(tz=timezone.utc)
