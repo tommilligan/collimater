@@ -267,7 +267,7 @@ class RelevantMarkExtractor:
 
     def poll(self) -> None:
         try:
-            self._calendar = self._calendar_queue.get()
+            self._calendar = self._calendar_queue.get(timeout=self._poll_interval)
         except queue.Empty:
             pass
 
@@ -429,6 +429,13 @@ class Collimater:
         display_manager_thread.join()
 
 
+def left_pad_excluding_periods(
+    value: str, target_length: str, padding_character: str
+) -> str:
+    padding = padding_character * (target_length - (len(value) - value.count(".")))
+    return padding + value
+
+
 def format_timedelta(delta: timedelta) -> str:
     total_seconds = delta.total_seconds()
     sign = "-" if total_seconds < 0 else " "
@@ -438,8 +445,19 @@ def format_timedelta(delta: timedelta) -> str:
     remainder = remainder - (hours * 3600)
     # minutes
     minutes = int(remainder // 60)
+    seconds = int(remainder - (minutes * 60))
 
-    return f"   {sign}{hours:02}.{minutes:02}"
+    seconds_format = "02" if minutes > 0 else ""
+    minutes_format = "02" if hours > 0 else ""
+
+    display = f"{seconds:{seconds_format}}"
+    if minutes > 0:
+        display = f"{minutes:{minutes_format}}.{display}"
+    if hours > 0:
+        display = f"{hours}.{display}"
+
+    display = f"{sign}{display}"
+    return left_pad_excluding_periods(display, 8, " ")
 
 
 def run(args: argparse.Namespace) -> None:
