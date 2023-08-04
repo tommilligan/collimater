@@ -1,10 +1,12 @@
+#!/usr/bin/env python
+
 import argparse
 import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Protocol
 
 import recurring_ical_events
 from dotenv import load_dotenv
@@ -19,7 +21,12 @@ class ConfigurationError(Exception):
     """Raised when there is a misconfiguration."""
 
 
-class CalendarFetcher:
+class CalendarFetcher(Protocol):
+    def fetch(self) -> Calendar:
+        ...
+
+
+class CalendarFetcherRemote:
     _session: Session
     _ics_url: str
 
@@ -29,6 +36,19 @@ class CalendarFetcher:
 
     def fetch(self) -> Calendar:
         ics = self._session.get(self._ics_url).text
+        calendar = Calendar.from_ical(ics)
+        return calendar
+
+
+class CalendarFetcherLocal:
+    _path: str
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def fetch(self) -> Calendar:
+        with open(self._path, "r") as fh:
+            ics = fh.read()
         calendar = Calendar.from_ical(ics)
         return calendar
 
@@ -143,7 +163,6 @@ def find_relevant_mark(
 
 
 class Printer:
-    _session: Session
     _ics_url: str
 
     def __init__(self, session: Session, ics_url: str) -> None:
@@ -163,9 +182,9 @@ class Collimater:
         self._calendar_fetcher = calendar_fetcher
 
     def run(self) -> None:
-        pass
+        self.poll()
 
-    def poll() -> None:
+    def poll(self) -> None:
         calendar = self._calendar_fetcher.fetch()
         now = datetime.now()
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -184,6 +203,7 @@ class Collimater:
             ),
             now=datetime.now(tz=timezone.utc),
         )
+        _log.info(f"Relevant mark: {relevant_mark}")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -193,19 +213,27 @@ def run(args: argparse.Namespace) -> None:
 
     session.mount("https://", HTTPAdapter(max_retries=retries))
 
-    ics_url = os.getenv("COLLIMATER_ICS_URL")
-    if ics_url is None:
-        raise ConfigurationError(
-            "COLLIMATER_ICS_URL must be set to a syncable calendar"
-        )
+    if args.calendar_file is not None:
+        calendar_fetcher = CalendarFetcherLocal(path=args.calendar_file)
+    else:
+        ics_url = os.getenv("COLLIMATER_ICS_URL")
+        if ics_url is None:
+            raise ConfigurationError(
+                "COLLIMATER_ICS_URL must be set to a syncable calendar"
+            )
 
-    calendar_fetcher = CalendarFetcher(session=session, ics_url=ics_url)
+        calendar_fetcher = CalendarFetcherRemote(session=session, ics_url=ics_url)
 
     Collimater(calendar_fetcher=calendar_fetcher).run()
 
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="collimater - keep yourself on track")
+    parser.add_argument(
+        "--calendar-file",
+        type=str,
+        help="The local calendar file to use. Defaults to remote url",
+    )
     parser.add_argument(
         "--calendar-poll-interval",
         type=float,
