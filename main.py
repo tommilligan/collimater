@@ -11,6 +11,10 @@ from typing import Iterable, List, Optional, Protocol
 import recurring_ical_events
 from dotenv import load_dotenv
 from icalendar import Calendar, Event
+from luma.core.error import DeviceNotFoundError
+from luma.core.interface.serial import noop, spi
+from luma.core.virtual import sevensegment, viewport
+from luma.led_matrix.device import max7219
 from requests import Session
 from requests.adapters import HTTPAdapter, Retry
 
@@ -19,6 +23,29 @@ _log = logging.getLogger(__file__)
 
 class ConfigurationError(Exception):
     """Raised when there is a misconfiguration."""
+
+
+class Printer(Protocol):
+    def print(self, value: str) -> None:
+        ...
+
+
+class PrinterCli:
+    def print(self, value: str) -> Calendar:
+        print(value)
+
+
+class PrinterZeroseg:
+    _seg: sevensegment
+
+    def __init__(self):
+        serial = spi(port=0, device=0, gpio=noop())
+        device = max7219(serial, cascaded=1)
+        seg = sevensegment(device)
+        self._seg = seg
+
+    def print(self, value: str) -> Calendar:
+        self._seg.text = value
 
 
 class CalendarFetcher(Protocol):
@@ -162,31 +189,20 @@ def find_relevant_mark(
     return None
 
 
-class Printer:
-    _ics_url: str
-
-    def __init__(self, session: Session, ics_url: str) -> None:
-        self._session = session
-        self._ics_url = ics_url
-
-    def fetch(self) -> Calendar:
-        ics = self._session.get(self._ics_url).text
-        calendar = Calendar.from_ical(ics)
-        return calendar
-
-
 class Collimater:
-    _session: Session
+    _calendar_fetcher: CalendarFetcher
+    _printer: Printer
 
-    def __init__(self, calendar_fetcher: CalendarFetcher) -> None:
+    def __init__(self, calendar_fetcher: CalendarFetcher, printer: Printer) -> None:
         self._calendar_fetcher = calendar_fetcher
+        self._printer = printer
 
     def run(self) -> None:
         self.poll()
 
     def poll(self) -> None:
         calendar = self._calendar_fetcher.fetch()
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date = start_date + timedelta(days=2)
 
@@ -201,9 +217,27 @@ class Collimater:
                 recent=10.0 * 60.0,
                 scheduled=10.0 * 60.0,
             ),
-            now=datetime.now(tz=timezone.utc),
+            now=now,
         )
         _log.info(f"Relevant mark: {relevant_mark}")
+
+        if relevant_mark is None:
+            self._printer.print("")
+            return
+
+        self._printer.print(format_timedelta(relevant_mark.mark.at - now))
+
+
+def format_timedelta(delta: timedelta) -> str:
+    remainder = delta.total_seconds()
+    # hours
+    hours = int(remainder // 3600)
+    remainder = remainder - (hours * 3600)
+    # minutes
+    minutes = int(remainder // 60)
+    seconds = int(remainder - (minutes * 60))
+
+    return "{:02}:{:02}:{:02}".format(hours, minutes, seconds)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -224,7 +258,12 @@ def run(args: argparse.Namespace) -> None:
 
         calendar_fetcher = CalendarFetcherRemote(session=session, ics_url=ics_url)
 
-    Collimater(calendar_fetcher=calendar_fetcher).run()
+    try:
+        printer = PrinterZeroseg()
+    except DeviceNotFoundError:
+        printer = PrinterCli()
+
+    Collimater(calendar_fetcher=calendar_fetcher, printer=printer).run()
 
 
 def make_parser() -> argparse.ArgumentParser:
