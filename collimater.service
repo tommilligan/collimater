@@ -1,0 +1,16 @@
+# systemd service for collimater
+
+[Unit]
+Description=collimater
+After=network.target
+
+[Service]
+ExecStart=/home/pi/collimater/.venv/bin/python3 /home/pi/collimater/main.py
+WorkingDirectory=/home/pi/collimater
+StandardError=append:/var/log/collimater.log
+Restart=always
+User=pi
+Group=pi
+
+[Install]
+WantedBy=multi-user.target
