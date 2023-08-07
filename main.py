@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable, Iterable, List, Optional, Protocol, Union
 
+import backoff
 import recurring_ical_events
 from dotenv import load_dotenv
 from icalendar import Calendar, Event
@@ -20,6 +21,7 @@ from luma.core.virtual import sevensegment
 from luma.led_matrix.device import max7219
 from requests import Session
 from requests.adapters import HTTPAdapter, Retry
+from requests.exceptions import RequestException
 
 _log = logging.getLogger(__file__)
 
@@ -91,9 +93,19 @@ class CalendarFetcherRemote:
         self._ics_url = ics_url
 
     def fetch(self) -> Calendar:
-        ics = self._session.get(self._ics_url).text
+        ics = self._fetch_remote()
         calendar = Calendar.from_ical(ics)
         return calendar
+
+    @backoff.on_exception(
+        backoff.expo,
+        RequestException,
+        max_tries=5,
+        logger=_log,
+        backoff_log_level=logging.WARNING,
+    )
+    def _fetch_remote(self) -> str:
+        return self._session.get(self._ics_url).text
 
 
 class CalendarFetcherLocal:
@@ -300,7 +312,6 @@ class RelevantMarkExtractor:
         relevant_mark = find_relevant_mark(
             marks,
             criteria=RelevantCriteria(
-                # FIXME
                 imminent=3.0 * 60.0,
                 recent=2.0 * 60.0,
                 scheduled=10.0 * 60.0,

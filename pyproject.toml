@@ -12,6 +12,7 @@ dependencies = [
     "recurring-ical-events>=2.0.2",
     "recurring-ical-events>=2.0.2",
     "luma.led_matrix>=1.7.0",
+    "backoff>=2.2.1",
 ]
 requires-python = ">=3.9"
 readme = "README.md"
