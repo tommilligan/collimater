@@ -2,6 +2,8 @@
 
 Keep yourself on track, with meetings alignment status.
 
+![A raspberry pi with 7-segment display running collimater](./display_640_480.jpg)
+
 ## Installation
 
 Clone the repo to the target machine (or copy the relevant files with `scp`)
