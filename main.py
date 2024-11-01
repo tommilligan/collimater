@@ -14,7 +14,7 @@ from typing import Callable, Iterable, List, Optional, Protocol, Union
 import backoff
 import recurring_ical_events
 from dotenv import load_dotenv
-from icalendar import Calendar, Event
+import icalendar
 from luma.core.error import DeviceNotFoundError
 from luma.core.interface.serial import noop, spi
 from luma.core.virtual import sevensegment
@@ -37,7 +37,7 @@ class Uninitialized(Enum):
 def poll_until_shutdown(
     callable: Callable[[], None],
     poll_interval: float,
-    shutdown_event: Event,
+    shutdown_event: threading.Event,
 ) -> None:
     _log.info("Polling every %.1f seconds...", poll_interval)
     while not shutdown_event.is_set():
@@ -57,12 +57,11 @@ class ConfigurationError(Exception):
 
 
 class Printer(Protocol):
-    def print(self, value: str) -> None:
-        ...
+    def print(self, value: str) -> None: ...
 
 
 class PrinterCli:
-    def print(self, value: str) -> Calendar:
+    def print(self, value: str) -> None:
         print(value)
 
 
@@ -75,13 +74,12 @@ class PrinterZeroseg:
         seg = sevensegment(device)
         self._seg = seg
 
-    def print(self, value: str) -> Calendar:
+    def print(self, value: str) -> None:
         self._seg.text = value
 
 
 class CalendarFetcher(Protocol):
-    def fetch(self) -> Calendar:
-        ...
+    def fetch(self) -> icalendar.cal.Component: ...
 
 
 class CalendarFetcherRemote:
@@ -92,9 +90,9 @@ class CalendarFetcherRemote:
         self._session = session
         self._ics_url = ics_url
 
-    def fetch(self) -> Calendar:
+    def fetch(self) -> icalendar.cal.Component:
         ics = self._fetch_remote()
-        calendar = Calendar.from_ical(ics)
+        calendar = icalendar.Calendar.from_ical(ics)
         return calendar
 
     @backoff.on_exception(
@@ -114,10 +112,10 @@ class CalendarFetcherLocal:
     def __init__(self, path: str) -> None:
         self._path = path
 
-    def fetch(self) -> Calendar:
+    def fetch(self) -> icalendar.cal.Component:
         with open(self._path, "r") as fh:
             ics = fh.read()
-        calendar = Calendar.from_ical(ics)
+        calendar = icalendar.Calendar.from_ical(ics)
         return calendar
 
 
@@ -145,7 +143,7 @@ class Mark:
     freebusy: Freebusy
 
     @staticmethod
-    def from_event(event: Event) -> Optional["Mark"]:
+    def from_event(event: icalendar.Event) -> Optional["Mark"]:
         at = event["DTSTART"].dt
 
         # Skip all day events
@@ -160,7 +158,7 @@ class Mark:
         return Mark(at=at, description=description, freebusy=freebusy)
 
 
-def extract_marks(events: Iterable[Event]) -> List[Mark]:
+def extract_marks(events: Iterable[icalendar.Event]) -> List[Mark]:
     marks = []
     for event in events:
         mark = Mark.from_event(event)
@@ -267,7 +265,7 @@ class StasisIndicator:
 class RelevantMarkExtractor:
     _poll_interval: float
     _calendar_queue: queue.Queue
-    _calender: Optional[Calendar]
+    _calender: Optional[icalendar.cal.Component]
     _relevant_mark_queue: queue.Queue
 
     def __init__(
@@ -462,7 +460,7 @@ class Collimater:
 
 
 def left_pad_excluding_periods(
-    value: str, target_length: str, padding_character: str
+    value: str, target_length: int, padding_character: str
 ) -> str:
     padding = padding_character * (target_length - (len(value) - value.count(".")))
     return padding + value
