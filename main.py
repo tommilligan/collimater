@@ -358,11 +358,20 @@ class DisplayManager:
         )
 
     def poll(self) -> None:
-        try:
-            self._relevant_mark = self._relevant_mark_queue.get(block=False)
-        except queue.Empty:
-            pass
+        self._update_relevant_mark()
+        self._print()
 
+    def _update_relevant_mark(self) -> None:
+        try:
+            new_relevant_mark = self._relevant_mark_queue.get(block=False)
+        except queue.Empty:
+            return
+
+        if new_relevant_mark != self._relevant_mark:
+            _log.info("Relevant mark changed to %r", new_relevant_mark)
+            self._relevant_mark = new_relevant_mark
+
+    def _print(self) -> None:
         if self._relevant_mark is Uninitialized.UNINITIALIZED:
             self._printer.print(self._loading_indicator.display())
             self._loading_indicator.tick()
