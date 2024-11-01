@@ -39,7 +39,7 @@ def poll_until_shutdown(
     poll_interval: float,
     shutdown_event: threading.Event,
 ) -> None:
-    _log.info("Polling every %.1f seconds...", poll_interval)
+    _log.info("Polling every %.1f seconds", poll_interval)
     while not shutdown_event.is_set():
         start_time = time.monotonic()
         callable()
@@ -103,6 +103,7 @@ class CalendarFetcherRemote:
         backoff_log_level=logging.WARNING,
     )
     def _fetch_remote(self) -> str:
+        _log.info("Fetching ics file from remote url %r", self._ics_url)
         return self._session.get(self._ics_url).text
 
 
@@ -113,6 +114,7 @@ class CalendarFetcherLocal:
         self._path = path
 
     def fetch(self) -> icalendar.cal.Component:
+        _log.info("Fetching ics file from local file %r", self._path)
         with open(self._path, "r") as fh:
             ics = fh.read()
         calendar = icalendar.Calendar.from_ical(ics)
@@ -299,7 +301,7 @@ class RelevantMarkExtractor:
         if self._calendar is None:
             return
 
-        _log.info("Extracting relevant mark")
+        _log.debug("Extracting relevant mark")
         now = datetime.now(tz=timezone.utc)
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date = start_date + timedelta(days=2)
@@ -316,7 +318,7 @@ class RelevantMarkExtractor:
             ),
             now=now,
         )
-        _log.info(f"Extracted relevant mark: {relevant_mark}")
+        _log.debug(f"Extracted relevant mark: {relevant_mark}")
         try:
             self._relevant_mark_queue.put(relevant_mark)
         except queue.Full:
@@ -407,13 +409,13 @@ class Collimater:
         relevant_mark_queue = queue.Queue(1)
 
         def calendar_fetcher_loop() -> None:
-            _log.info("Fetching calendar")
+            _log.debug("Fetching calendar")
             calendar = self._calendar_fetcher.fetch()
             try:
                 calendar_queue.put(calendar)
             except queue.Full:
                 pass
-            _log.info("Fetched calendar")
+            _log.debug("Fetched calendar")
 
         def calender_fetcher_run() -> None:
             poll_until_shutdown(
@@ -549,12 +551,18 @@ def make_parser() -> argparse.ArgumentParser:
         default=0.2,
         help="The interval to refresh the display output",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="The log level to use.",
+    )
     return parser
 
 
-def setup_logging() -> None:
+def setup_logging(log_level: str) -> None:
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(log_level)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
         logging.Formatter(
@@ -562,15 +570,15 @@ def setup_logging() -> None:
         )
     )
     root_logger.handlers = [stream_handler]
+    _log.info("Setup logging with level %r", log_level)
 
 
 def main() -> None:
-    setup_logging()
     load_dotenv()
-
     parser = make_parser()
     args = parser.parse_args()
 
+    setup_logging(args.log_level)
     run(args)
 
 
