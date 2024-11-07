@@ -123,6 +123,7 @@ class CalendarFetcherLocal:
 
 class Freebusy(Enum):
     FREE = "FREE"
+    TENTATIVE = "TENTATIVE"
     BUSY = "BUSY"
 
     @staticmethod
@@ -142,7 +143,6 @@ class Mark:
 
     at: datetime
     description: str
-    freebusy: Freebusy
 
     @staticmethod
     def from_event(event: icalendar.Event) -> Optional["Mark"]:
@@ -152,12 +152,14 @@ class Mark:
         if type(at) == date:
             return None
 
+        # Whether the meeting is marked as free or busy in calender (None if unknown)
+        freebusy = Freebusy.try_from(event.get("X-MICROSOFT-CDO-BUSYSTATUS", ""))
+        # If it's explicitly marked as Free, don't show
+        if freebusy is Freebusy.FREE:
+            return None
+
         description = event["SUMMARY"]
-        freebusy = (
-            Freebusy.try_from(event.get("X-MICROSOFT-CDO-BUSYSTATUS", ""))
-            or Freebusy.BUSY
-        )
-        return Mark(at=at, description=description, freebusy=freebusy)
+        return Mark(at=at, description=description)
 
 
 def extract_marks(events: Iterable[icalendar.Event]) -> List[Mark]:
@@ -215,9 +217,6 @@ def find_relevant_mark(
     future = None
 
     for mark in marks:
-        if mark.freebusy is Freebusy.FREE:
-            continue
-
         if mark.at < now:
             past = mark
         else:
