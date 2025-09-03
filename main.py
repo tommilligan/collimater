@@ -294,6 +294,7 @@ class RelevantMarkExtractor:
     def poll(self) -> None:
         try:
             self._calendar = self._calendar_queue.get(timeout=self._poll_interval)
+            _log.info("Loaded new calendar for RelevantMarkExtractor")
         except queue.Empty:
             pass
 
@@ -417,13 +418,13 @@ class Collimater:
         relevant_mark_queue = queue.Queue(1)
 
         def calendar_fetcher_loop() -> None:
-            _log.debug("Fetching calendar")
+            _log.info("Fetching calendar")
             calendar = self._calendar_fetcher.fetch()
             try:
                 calendar_queue.put(calendar)
             except queue.Full:
                 pass
-            _log.debug("Fetched calendar")
+            _log.info("Fetched calendar")
 
         def calender_fetcher_run() -> None:
             poll_until_shutdown(
