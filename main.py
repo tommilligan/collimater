@@ -11,7 +11,6 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable, Iterable, List, Optional, Protocol, Union
 
-import backoff
 import recurring_ical_events
 from dotenv import load_dotenv
 import icalendar
@@ -24,8 +23,6 @@ from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import RequestException
 
 _log = logging.getLogger(__file__)
-
-_DEFAULT_DISPLAY = " " * 8 + "."
 
 
 class Uninitialized(Enum):
@@ -95,13 +92,6 @@ class CalendarFetcherRemote:
         calendar = icalendar.Calendar.from_ical(ics)
         return calendar
 
-    @backoff.on_exception(
-        backoff.expo,
-        RequestException,
-        max_tries=5,
-        logger=_log,
-        backoff_log_level=logging.WARNING,
-    )
     def _fetch_remote(self) -> str:
         _log.info("Fetching ics file from remote url %r", self._ics_url)
         return self._session.get(self._ics_url).text
@@ -294,6 +284,7 @@ class RelevantMarkExtractor:
     def poll(self) -> None:
         try:
             self._calendar = self._calendar_queue.get(timeout=self._poll_interval)
+            _log.info("Loaded new calendar for RelevantMarkExtractor")
         except queue.Empty:
             pass
 
@@ -416,18 +407,23 @@ class Collimater:
         calendar_queue = queue.Queue(1)
         relevant_mark_queue = queue.Queue(1)
 
-        def calendar_fetcher_loop() -> None:
-            _log.debug("Fetching calendar")
-            calendar = self._calendar_fetcher.fetch()
+        def calendar_fetcher_poll() -> None:
+            _log.info("Fetching calendar")
+            try:
+                calendar = self._calendar_fetcher.fetch()
+            except RequestException:
+                _log.exception("Fetching calendar failed, no calendar added to queue")
+                return
+
             try:
                 calendar_queue.put(calendar)
             except queue.Full:
                 pass
-            _log.debug("Fetched calendar")
+            _log.info("Fetched calendar")
 
         def calender_fetcher_run() -> None:
             poll_until_shutdown(
-                calendar_fetcher_loop,
+                calendar_fetcher_poll,
                 self._calendar_fetch_interval,
                 self._shutdown_event,
             )
