@@ -417,9 +417,14 @@ class Collimater:
         calendar_queue = queue.Queue(1)
         relevant_mark_queue = queue.Queue(1)
 
-        def calendar_fetcher_loop() -> None:
+        def calendar_fetcher_poll() -> None:
             _log.info("Fetching calendar")
-            calendar = self._calendar_fetcher.fetch()
+            try:
+                calendar = self._calendar_fetcher.fetch()
+            except RequestException:
+                _log.exception("Fetching calendar failed, no calendar added to queue")
+                return
+
             try:
                 calendar_queue.put(calendar)
             except queue.Full:
@@ -428,7 +433,7 @@ class Collimater:
 
         def calender_fetcher_run() -> None:
             poll_until_shutdown(
-                calendar_fetcher_loop,
+                calendar_fetcher_poll,
                 self._calendar_fetch_interval,
                 self._shutdown_event,
             )
